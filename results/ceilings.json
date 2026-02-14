@@ -1,0 +1,21 @@
+{
+  "peak_compute_gflops": 1250.7670741268234,
+  "peak_mem_bw_gbps": 34.0151773123828,
+  "source_csv": "results/benchmarks.csv",
+  "stats": {
+    "peak_bw_cpu_gbps": {
+      "count": 5.0,
+      "max": 34.0151773123828,
+      "mean": 21.078530019498853,
+      "min": 13.977070754724044,
+      "std": 7.637484498715836
+    },
+    "peak_gemm_cpu_gflops": {
+      "count": 5.0,
+      "max": 1250.7670741268234,
+      "mean": 1155.780732591441,
+      "min": 1076.612803979954,
+      "std": 70.05786278846998
+    }
+  }
+}
