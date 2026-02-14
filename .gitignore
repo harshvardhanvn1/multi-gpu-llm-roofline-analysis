@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pth
+*.pt
+*.nsys-rep
+*.ncu-rep
+*.sqlite
+.vscode/
+.idea/
+*.swp
+results/*.csv
+!results/README.md
