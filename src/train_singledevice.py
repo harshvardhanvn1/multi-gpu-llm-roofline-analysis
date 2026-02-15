@@ -24,6 +24,7 @@ class TrainConfig:
     device: str
     seed: int
     use_amp: bool
+    model: str
 
 
 def _parse_args() -> TrainConfig:
@@ -37,6 +38,7 @@ def _parse_args() -> TrainConfig:
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--output", type=Path, default=Path("results/single.csv"))
     p.add_argument("--amp", action="store_true", help="Use autocast on CUDA (recommended for fp16/bf16).")
+    p.add_argument("--model", choices=["gpt2_tiny", "gpt2_mediumish"], default="gpt2_tiny")
     args = p.parse_args()
 
     if args.batch_size <= 0 or args.seq_len <= 0:
@@ -54,22 +56,43 @@ def _parse_args() -> TrainConfig:
         device=args.device,
         seed=args.seed,
         use_amp=bool(args.amp),
+        model=str(args.model),
     )
 
 
-def _make_tiny_gpt2(vocab_size: int = 50257, n_positions: int = 256) -> GPT2LMHeadModel:
-    cfg = GPT2Config(
-        vocab_size=vocab_size,
-        n_positions=n_positions,
-        n_embd=256,
-        n_layer=4,
-        n_head=4,
-    )
+def _make_model(model_name: str, seq_len: int, vocab_size: int = 50257) -> GPT2LMHeadModel:
+    # Keep n_positions >= seq_len so attention shapes are correct.
+    n_positions = max(seq_len, 256)
+
+    if model_name == "gpt2_tiny":
+        cfg = GPT2Config(
+            vocab_size=vocab_size,
+            n_positions=n_positions,
+            n_embd=256,
+            n_layer=4,
+            n_head=4,
+        )
+    elif model_name == "gpt2_mediumish":
+        # Bigger but still safe on 2×80GB for profiling/benchmarks.
+        # This increases compute + gradient sizes so comm/overhead becomes measurable.
+        cfg = GPT2Config(
+            vocab_size=vocab_size,
+            n_positions=n_positions,
+            n_embd=1024,
+            n_layer=24,
+            n_head=16,
+        )
+    else:
+        raise ValueError(f"Unsupported model: {model_name}")
+
     return GPT2LMHeadModel(cfg)
 
 
-def _synthetic_batch(batch_size: int, seq_len: int, vocab_size: int, device: torch.device) -> dict[str, torch.Tensor]:
-    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), device=device)
+def _synthetic_batch(
+    batch_size: int, seq_len: int, vocab_size: int, device: torch.device, seed: int
+) -> dict[str, torch.Tensor]:
+    g = torch.Generator(device=device).manual_seed(seed)
+    input_ids = torch.randint(0, vocab_size, (batch_size, seq_len), generator=g, device=device)
     return {"input_ids": input_ids, "labels": input_ids}
 
 
@@ -92,7 +115,6 @@ def main() -> None:
     cfg = _parse_args()
     torch.manual_seed(cfg.seed)
 
-    # Fail fast: if user asked for CUDA, do not silently fall back to CPU.
     want_cuda = cfg.device == "cuda"
     if want_cuda and not torch.cuda.is_available():
         raise RuntimeError(
@@ -103,7 +125,6 @@ def main() -> None:
 
     # Choose compute dtype
     if device.type == "cpu":
-        # Keep CPU baseline stable
         compute_dtype = torch.float32
         use_amp = False
     else:
@@ -115,16 +136,16 @@ def main() -> None:
         else:
             compute_dtype = torch.float32
 
-    model = _make_tiny_gpt2(n_positions=max(cfg.seq_len, 256)).to(device=device)
+    model = _make_model(cfg.model, cfg.seq_len).to(device=device)
     model.train()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=5e-4)
 
-    # AMP helpers (CUDA only)
     use_grad_scaler = device.type == "cuda" and compute_dtype == torch.float16 and use_amp
     scaler = torch.cuda.amp.GradScaler(enabled=use_grad_scaler)
 
-    def train_step(batch: dict[str, torch.Tensor]) -> float:
+    def train_step(step_seed: int) -> float:
+        batch = _synthetic_batch(cfg.batch_size, cfg.seq_len, model.config.vocab_size, device, step_seed)
         optimizer.zero_grad(set_to_none=True)
 
         if device.type == "cuda" and use_amp:
@@ -144,21 +165,19 @@ def main() -> None:
             loss.backward()
             optimizer.step()
 
-        return float(loss.detach().cpu().item())
+        return float(loss.detach().float().cpu().item())
 
     # Warmup
-    for _ in range(cfg.warmup_steps):
-        batch = _synthetic_batch(cfg.batch_size, cfg.seq_len, model.config.vocab_size, device)
-        _ = train_step(batch)
+    for i in range(cfg.warmup_steps):
+        _ = train_step(cfg.seed + i)
     _sync(device)
 
     # Measure
     _sync(device)
     start = time.perf_counter()
     last_loss: Optional[float] = None
-    for _ in range(cfg.measure_steps):
-        batch = _synthetic_batch(cfg.batch_size, cfg.seq_len, model.config.vocab_size, device)
-        last_loss = train_step(batch)
+    for i in range(cfg.measure_steps):
+        last_loss = train_step(cfg.seed + 1_000 + i)
     _sync(device)
     end = time.perf_counter()
 
@@ -167,9 +186,7 @@ def main() -> None:
     tokens_per_step = cfg.batch_size * cfg.seq_len
     tokens_per_sec = tokens_per_step / (step_time_ms / 1000.0)
 
-    dtype_name = "fp32"
-    if device.type == "cuda":
-        dtype_name = cfg.dtype
+    dtype_name = "fp32" if device.type == "cpu" else cfg.dtype
 
     params = {
         "device": device.type,
@@ -178,7 +195,7 @@ def main() -> None:
         "seq_len": cfg.seq_len,
         "warmup_steps": cfg.warmup_steps,
         "measure_steps": cfg.measure_steps,
-        "model": "gpt2_tiny",
+        "model": cfg.model,
         "amp": bool(device.type == "cuda" and use_amp),
     }
 
@@ -193,6 +210,7 @@ def main() -> None:
     header = [
         "device",
         "dtype",
+        "model",
         "batch_size",
         "seq_len",
         "warmup_steps",
@@ -204,6 +222,7 @@ def main() -> None:
     row = {
         "device": device.type,
         "dtype": dtype_name,
+        "model": cfg.model,
         "batch_size": cfg.batch_size,
         "seq_len": cfg.seq_len,
         "warmup_steps": cfg.warmup_steps,
@@ -214,7 +233,7 @@ def main() -> None:
     }
     _write_csv_row(cfg.output, header, row)
 
-    print("Single-device Training Benchmark (tiny)")
+    print(f"Single-device Training Benchmark ({cfg.model})")
     print(f"Device: {device.type} | dtype: {dtype_name} | amp: {params['amp']}")
     print(f"Batch size: {cfg.batch_size} | Seq len: {cfg.seq_len}")
     print(f"Step time: {step_time_ms:.2f} ms | Tokens/sec: {tokens_per_sec:,.0f}")

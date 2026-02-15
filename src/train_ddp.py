@@ -47,7 +47,7 @@ def _parse_args() -> TrainDDPConfig:
     p.add_argument("--amp", action="store_true", help="Use autocast on CUDA (recommended for fp16/bf16).")
 
     p.add_argument("--seed", type=int, default=1234)
-    p.add_argument("--model", choices=["gpt2_tiny"], default="gpt2_tiny")
+    p.add_argument("--model", choices=["gpt2_tiny", "gpt2_mediumish"], default="gpt2_tiny")
     a = p.parse_args()
 
     if a.batch_size <= 0 or a.seq_len <= 0:
@@ -81,16 +81,29 @@ def _local_rank() -> int:
 
 
 def _make_model(model_name: str, seq_len: int) -> GPT2LMHeadModel:
-    if model_name != "gpt2_tiny":
+    # Keep n_positions >= seq_len so attention shapes are correct.
+    n_positions = max(seq_len, 256)
+
+    if model_name == "gpt2_tiny":
+        cfg = GPT2Config(
+            vocab_size=50257,
+            n_positions=n_positions,
+            n_embd=256,
+            n_layer=4,
+            n_head=4,
+        )
+    elif model_name == "gpt2_mediumish":
+        # Bigger model so profiling/optimization is meaningful on A100s.
+        cfg = GPT2Config(
+            vocab_size=50257,
+            n_positions=n_positions,
+            n_embd=1024,
+            n_layer=24,
+            n_head=16,
+        )
+    else:
         raise ValueError(f"Unsupported model: {model_name}")
 
-    cfg = GPT2Config(
-        vocab_size=50257,
-        n_positions=max(seq_len, 256),
-        n_embd=256,
-        n_layer=4,
-        n_head=4,
-    )
     return GPT2LMHeadModel(cfg)
 
 
@@ -101,7 +114,6 @@ def _synthetic_batch(
     g = torch.Generator(device=device).manual_seed(seed)
     x = torch.randint(0, vocab_size, (batch_size, seq_len), generator=g, device=device)
     return {"input_ids": x, "labels": x}
-
 
 
 def _sync(device: torch.device) -> None:
@@ -209,12 +221,16 @@ def main() -> None:
     tokens_per_step_local = cfg.batch_size * cfg.seq_len
     tokens_per_sec_local = tokens_per_step_local / (step_time_ms_local / 1000.0)
 
-    tps_tensor = torch.tensor([tokens_per_sec_local], dtype=torch.float64, device=device if device.type == "cuda" else None)
+    tps_tensor = torch.tensor(
+        [tokens_per_sec_local], dtype=torch.float64, device=device if device.type == "cuda" else None
+    )
     dist.all_reduce(tps_tensor, op=dist.ReduceOp.SUM)
     tokens_per_sec_global = float(tps_tensor.item())
 
     # Also compute mean step_time across ranks (for reporting consistency)
-    step_ms_tensor = torch.tensor([step_time_ms_local], dtype=torch.float64, device=device if device.type == "cuda" else None)
+    step_ms_tensor = torch.tensor(
+        [step_time_ms_local], dtype=torch.float64, device=device if device.type == "cuda" else None
+    )
     dist.all_reduce(step_ms_tensor, op=dist.ReduceOp.SUM)
     step_time_ms_mean = float(step_ms_tensor.item() / world)
 
@@ -256,3 +272,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
