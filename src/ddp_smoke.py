@@ -16,19 +16,32 @@ class Config:
     batch_size: int
     seq_len: int
     steps: int
-    backend: str
+    device: str  # "cpu" or "cuda"
+    backend: str  # "gloo" or "nccl"
     seed: int
 
 
 def _parse_args() -> Config:
-    p = argparse.ArgumentParser(description="DDP smoke test (CPU, world_size=1).")
+    p = argparse.ArgumentParser(description="DDP smoke test (single node, multi-process).")
     p.add_argument("--batch_size", type=int, default=2)
     p.add_argument("--seq_len", type=int, default=64)
     p.add_argument("--steps", type=int, default=2)
-    p.add_argument("--backend", type=str, default="gloo", choices=["gloo"])
+
+    # Default behavior: if CUDA is available, use CUDA+NCCL; otherwise CPU+Gloo.
+    cuda_available = torch.cuda.is_available()
+    p.add_argument("--device", choices=["cpu", "cuda"], default=("cuda" if cuda_available else "cpu"))
+    p.add_argument("--backend", choices=["gloo", "nccl"], default=("nccl" if cuda_available else "gloo"))
+
     p.add_argument("--seed", type=int, default=1234)
     args = p.parse_args()
-    return Config(args.batch_size, args.seq_len, args.steps, args.backend, args.seed)
+    return Config(
+        batch_size=int(args.batch_size),
+        seq_len=int(args.seq_len),
+        steps=int(args.steps),
+        device=str(args.device),
+        backend=str(args.backend),
+        seed=int(args.seed),
+    )
 
 
 def _make_tiny_gpt2(n_positions: int) -> GPT2LMHeadModel:
@@ -50,22 +63,49 @@ def main() -> None:
     cfg = _parse_args()
     torch.manual_seed(cfg.seed)
 
-    # env:// init requires these. For world_size=1, we provide defaults.
+    # env:// init requires these. torchrun usually provides them; defaults help local runs.
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ.setdefault("MASTER_PORT", "29500")
     os.environ.setdefault("RANK", "0")
     os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("LOCAL_RANK", "0")
+
+    if cfg.backend == "nccl" and cfg.device != "cuda":
+        raise ValueError("backend=nccl requires --device cuda")
+    if cfg.device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("You requested --device cuda, but CUDA is not available.")
 
     dist.init_process_group(backend=cfg.backend, init_method="env://")
     rank = dist.get_rank()
     world_size = dist.get_world_size()
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
 
-    device = torch.device("cpu")
+    if cfg.device == "cuda":
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cpu")
+
     model = _make_tiny_gpt2(cfg.seq_len).to(device)
     model.train()
-    ddp_model = DDP(model)
+
+    # For single-node torchrun, it's safe to pin each process to its GPU via device_ids.
+    if cfg.device == "cuda":
+        ddp_model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    else:
+        ddp_model = DDP(model)
 
     optim = torch.optim.AdamW(ddp_model.parameters(), lr=5e-4)
+
+    # Warmup one step to reduce first-iteration overhead noise (especially on CUDA).
+    batch = _synthetic_batch(cfg.batch_size, cfg.seq_len, model.config.vocab_size, device)
+    out = ddp_model(**batch)
+    loss = out.loss
+    optim.zero_grad(set_to_none=True)
+    loss.backward()
+    optim.step()
+    if cfg.device == "cuda":
+        torch.cuda.synchronize()
 
     t0 = time.perf_counter()
     last_loss = None
@@ -76,11 +116,17 @@ def main() -> None:
         optim.zero_grad(set_to_none=True)
         loss.backward()
         optim.step()
-        last_loss = float(loss.detach().cpu().item())
+        last_loss = float(loss.detach().float().cpu().item())
+    if cfg.device == "cuda":
+        torch.cuda.synchronize()
     t1 = time.perf_counter()
 
     if rank == 0:
-        print(f"ddp_smoke ok | backend={cfg.backend} world_size={world_size} steps={cfg.steps} last_loss={last_loss:.4f} elapsed_ms={(t1-t0)*1000:.2f}")
+        print(
+            f"ddp_smoke ok | device={cfg.device} backend={cfg.backend} "
+            f"world_size={world_size} steps={cfg.steps} last_loss={last_loss:.4f} "
+            f"elapsed_ms={(t1 - t0) * 1000:.2f}"
+        )
 
     dist.destroy_process_group()
 

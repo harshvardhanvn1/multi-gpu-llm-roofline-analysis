@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -29,9 +30,22 @@ def _gemm_ai(n: int, dtype: str) -> float:
     return flops / bytes_moved
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Plot roofline + latest GEMM point.")
+    p.add_argument("--ceilings", type=str, default="results/ceilings_cpu.json")
+    p.add_argument("--csv", type=str, default="results/benchmarks.csv")
+    p.add_argument("--out", type=str, default=None)
+    p.add_argument("--title", type=str, default=None)
+    p.add_argument("--gemm-benchmark", type=str, default="peak_gemm_cpu")
+    return p.parse_args()
+
+
 def main() -> None:
-    peak_compute_gflops, peak_bw_gbps = _load_ceilings(Path("results/ceilings.json"))
-    df = pd.read_csv("results/benchmarks.csv")
+    args = _parse_args()
+
+    ceilings_path = Path(args.ceilings)
+    peak_compute_gflops, peak_bw_gbps = _load_ceilings(ceilings_path)
+    df = pd.read_csv(args.csv)
 
     # Roofline curves
     ai = np.logspace(-3, 3, 400)
@@ -47,8 +61,8 @@ def main() -> None:
     plt.axhline(peak_compute_gflops, linestyle="--", label="Compute limit")
     plt.axvline(ridge_ai, linestyle=":", label=f"Ridge AI ≈ {ridge_ai:.2f} FLOP/byte")
 
-    # Plot latest GEMM point (most recent row for peak_gemm_cpu)
-    gemm_rows = df[(df["benchmark"] == "peak_gemm_cpu") & (df["metric_name"] == "gflops")]
+    # Plot latest GEMM point for selected benchmark
+    gemm_rows = df[(df["benchmark"] == args.gemm_benchmark) & (df["metric_name"] == "gflops")]
     if not gemm_rows.empty:
         last = gemm_rows.iloc[-1]
         params = json.loads(last["params_json"])
@@ -62,10 +76,11 @@ def main() -> None:
 
     plt.xlabel("Arithmetic Intensity (FLOP / byte)")
     plt.ylabel("Performance (GFLOP/s)")
-    plt.title("CPU Roofline (Ceilings + GEMM Point)")
+    title = args.title or f"Roofline (Ceilings + GEMM) [{ceilings_path.stem}]"
+    plt.title(title)
     plt.legend()
 
-    out = Path("plots/roofline_cpu_with_points.png")
+    out = Path(args.out) if args.out else Path("plots") / f"roofline_{ceilings_path.stem}_with_points.png"
     out.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out, dpi=200, bbox_inches="tight")
     print(f"Wrote {out}")

@@ -1,0 +1,16 @@
+{
+  "device": "cuda",
+  "peak_compute_gflops": 101339.10666148676,
+  "peak_mem_bw_gbps": 919.5492480676402,
+  "source_csv": "results/benchmarks.csv",
+  "gemm": {
+    "max": 101339.10666148676,
+    "mean": 101339.10666148676,
+    "n": 1.0
+  },
+  "bw": {
+    "max": 919.5492480676402,
+    "mean": 919.5492480676402,
+    "n": 1.0
+  }
+}

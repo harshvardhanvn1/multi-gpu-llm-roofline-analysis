@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -14,20 +15,28 @@ def _load_ceilings(path: Path) -> tuple[float, float]:
     return peak_compute, peak_bw
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Plot roofline from a ceilings JSON file.")
+    p.add_argument("--ceilings", type=str, default="results/ceilings_cpu.json", help="Path to ceilings JSON.")
+    p.add_argument("--out", type=str, default=None, help="Output PNG path.")
+    p.add_argument("--title", type=str, default=None, help="Plot title.")
+    return p.parse_args()
+
+
 def main() -> None:
-    ceilings_path = Path("results/ceilings.json")
+    args = _parse_args()
+    ceilings_path = Path(args.ceilings)
+
     peak_compute_gflops, peak_bw_gbps = _load_ceilings(ceilings_path)
 
-    # Arithmetic intensity (AI) = FLOPs / Byte
-    ai = np.logspace(-3, 3, 400)  # wide range: 1e-3 to 1e3 FLOP/byte
-
-    # Roofline:
-    # performance = min(peak_compute, peak_bw * AI)
+    ai = np.logspace(-3, 3, 400)
     mem_line = peak_bw_gbps * ai
     roof = np.minimum(peak_compute_gflops, mem_line)
-
-    # Ridge point where peak_bw*AI == peak_compute
     ridge_ai = peak_compute_gflops / peak_bw_gbps
+
+    title = args.title or f"Roofline ({ceilings_path.name})"
+    out = Path(args.out) if args.out else Path("plots") / f"roofline_{ceilings_path.stem}.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
 
     plt.figure()
     plt.xscale("log")
@@ -39,15 +48,11 @@ def main() -> None:
 
     plt.xlabel("Arithmetic Intensity (FLOP / byte)")
     plt.ylabel("Performance (GFLOP/s)")
-    plt.title("CPU Roofline (Measured Ceilings)")
+    plt.title(title)
     plt.legend()
 
-    out = Path("plots/roofline_cpu.png")
-    out.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(out, dpi=200, bbox_inches="tight")
     print(f"Wrote {out}")
-
-    # Also print ridge point clearly
     print(f"Ridge point AI: {ridge_ai:.4f} FLOP/byte")
 
 

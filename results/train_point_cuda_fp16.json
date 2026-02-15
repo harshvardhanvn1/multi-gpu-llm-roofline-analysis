@@ -1,0 +1,42 @@
+{
+  "kind": "train_point_estimate",
+  "assumptions": {
+    "flops": {
+      "mul_add_counts_as": 2,
+      "train_flops_multiplier_vs_forward": 3.0,
+      "includes_lm_head_vocab_projection": true,
+      "ignores_softmax_loss_elementwise_flops": true
+    },
+    "bytes": {
+      "model": "lower_bound_heuristic",
+      "bytes_per_step_formula": "6 * param_bytes(dtype)",
+      "notes": "Heuristic to approximate weight+grad+optimizer traffic (AdamW adds extra state)."
+    }
+  },
+  "inputs": {
+    "batch_size": 8,
+    "seq_len": 256,
+    "tokens_per_sec_measured": 123849.07288414954,
+    "dtype": "fp16",
+    "n_embd": 256,
+    "n_layer": 4,
+    "n_head": 4,
+    "vocab_size": 50257,
+    "n_positions": 256
+  },
+  "model": {
+    "param_count": 16090880,
+    "param_bytes": 32181760.0
+  },
+  "derived": {
+    "tokens_per_step": 2048.0,
+    "steps_per_sec": 60.473180119213644,
+    "forward_flops_per_step": 67730669568.0,
+    "train_flops_per_step": 203192008704.0,
+    "bytes_per_step_est": 193090560.0,
+    "flops_per_sec_est": 12287666941141.818,
+    "tflops_est": 12.287666941141818,
+    "bytes_per_sec_est": 11676800214.19983,
+    "arithmetic_intensity_flops_per_byte": 1052.3145652692706
+  }
+}
